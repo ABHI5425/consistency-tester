@@ -3,7 +3,7 @@
 // 2) Asks a separate judge call to compare the reply with the expected answer
 //    and label any failure as prompt / retrieval / content.
 
-const MODELS = (process.env.GEMINI_MODEL || "gemini-flash-latest,gemini-2.5-flash")
+const MODELS = (process.env.GEMINI_MODEL || "gemini-flash-latest,gemini-2.5-flash,gemini-flash-lite-latest")
   .split(",")
   .map((m) => m.trim())
   .filter(Boolean);
@@ -58,6 +58,7 @@ async function callGemini(key, { system, user, temperature = 0.2, schema }) {
   }
 
   let lastError;
+  let busy = null; // set when a model is rate-limited or overloaded
   for (const model of MODELS) {
     const r = await fetch(`${API}/${model}:generateContent`, {
       method: "POST",
@@ -76,13 +77,21 @@ async function callGemini(key, { system, user, temperature = 0.2, schema }) {
     const msg = data?.error?.message || `Gemini error ${r.status}`;
     if (r.status === 404) { lastError = new HttpError(404, msg); continue; } // model not available, try next
     if (r.status === 429) {
+      // Free-tier quotas are per model, so try the next one before giving up.
       const delay = (data?.error?.details || []).find((d) => d.retryDelay)?.retryDelay;
-      throw new HttpError(429, "Gemini free-tier rate limit hit.", delay ? parseInt(delay, 10) : 20);
+      const secs = delay ? parseInt(delay, 10) : 20;
+      busy = new HttpError(429, "Gemini free-tier rate limit hit.", busy ? Math.min(busy.retryAfter, secs) : secs);
+      continue;
+    }
+    if (r.status === 503 || r.status === 500 || /high demand|overloaded|unavailable/i.test(msg)) {
+      // Google-side overload: try the next model; if all are busy, the app waits and retries.
+      busy = busy || new HttpError(429, "Gemini is busy right now.", 10);
+      continue;
     }
     if (r.status === 400 && /api key/i.test(msg)) throw new HttpError(401, "That Gemini API key isn't valid.");
     throw new HttpError(r.status >= 500 ? 502 : r.status, msg);
   }
-  throw lastError || new HttpError(500, "No Gemini model available.");
+  throw busy || lastError || new HttpError(500, "No Gemini model available.");
 }
 
 export default async function handler(req, res) {
