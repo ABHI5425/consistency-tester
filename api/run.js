@@ -16,6 +16,8 @@ You receive: the assistant's SYSTEM PROMPT, its KNOWLEDGE BASE, a QUESTION, the 
 Step 1 - Verdict.
 PASS only if the actual answer matches the expected answer in substance (wording may differ) AND follows every rule in the system prompt.
 Otherwise FAIL.
+Important: if the expected answer gives information (a fact, a yes/no, a policy) and the actual answer does not give it, that is a FAIL, even if the assistant correctly followed a fallback rule such as "say you don't know". Following the fallback is the right behaviour, but the customer still did not get the answer the business wants them to get.
+Never count words yourself. Use the exact ACTUAL ANSWER WORD COUNT provided when checking length rules.
 
 Step 2 - If FAIL, pick exactly one root cause, checking in this order:
 - "content": the knowledge base does not contain the information needed for the expected answer, or contradicts it (missing, outdated or wrong). Use this even if the assistant faithfully repeated the knowledge base.
@@ -126,6 +128,7 @@ export default async function handler(req, res) {
         `QUESTION:\n${question}`,
         `EXPECTED ANSWER:\n${expected}`,
         `ACTUAL ANSWER:\n${answer.text}`,
+        `ACTUAL ANSWER WORD COUNT (exact): ${answer.text.trim().split(/\s+/).length}`,
       ].join("\n\n---\n\n"),
       temperature: 0,
       schema: JUDGE_SCHEMA,
