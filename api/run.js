@@ -1,14 +1,26 @@
-// Vercel serverless function: runs ONE test case.
-// 1) Asks the assistant (Gemini + your system prompt + knowledge base) the question.
-// 2) Asks a separate judge call to compare the reply with the expected answer
+// Vercel serverless function: runs ONE test case, using FREE models on OpenRouter.
+// 1) Asks the assistant model (your system prompt + knowledge base) the question.
+// 2) Asks a separate judge model to compare the reply with the expected answer
 //    and label any failure as prompt / retrieval / content.
+//
+// SAFETY: only model IDs ending in ":free" are ever called, so this can never
+// spend OpenRouter credits.
 
-const MODELS = (process.env.GEMINI_MODEL || "gemini-flash-latest,gemini-2.5-flash,gemini-flash-lite-latest")
-  .split(",")
-  .map((m) => m.trim())
-  .filter(Boolean);
+const API = "https://openrouter.ai/api/v1/chat/completions";
 
-const API = "https://generativelanguage.googleapis.com/v1beta/models";
+const onlyFree = (list) =>
+  list.split(",").map((m) => m.trim()).filter((m) => m && m.endsWith(":free"));
+
+// The "assistant" being tested. First model is preferred; others are backups.
+const ANSWER_MODELS = onlyFree(
+  process.env.ANSWER_MODELS ||
+    "google/gemma-4-31b-it:free,google/gemma-4-26b-a4b-it:free,nvidia/nemotron-3-super-120b-a12b:free"
+);
+// The judge. Prefer larger models that support structured JSON output.
+const JUDGE_MODELS = onlyFree(
+  process.env.JUDGE_MODELS ||
+    "nvidia/nemotron-3-super-120b-a12b:free,nvidia/nemotron-3.5-super-vl:free,google/gemma-4-31b-it:free"
+);
 
 const JUDGE_PROMPT = `You are a strict QA reviewer for customer-facing AI assistants.
 You receive: the assistant's SYSTEM PROMPT, its KNOWLEDGE BASE, a QUESTION, the EXPECTED ANSWER (written by the business owner, treat it as the truth), and the ACTUAL ANSWER the assistant gave.
@@ -27,82 +39,120 @@ If PASS, category is "none".
 
 Step 3 - reason: one short, specific sentence a product manager can act on. Quote the exact rule or knowledge-base line when relevant.
 
-Also report kb_has_answer: true if the knowledge base contains the information needed for the expected answer.`;
+Also report kb_has_answer: true if the knowledge base contains the information needed for the expected answer.
+
+Reply with ONLY a JSON object, no other text:
+{"verdict": "PASS" or "FAIL", "category": "none" | "prompt" | "retrieval" | "content", "kb_has_answer": true or false, "reason": "..."}`;
 
 const JUDGE_SCHEMA = {
-  type: "OBJECT",
-  properties: {
-    verdict: { type: "STRING", enum: ["PASS", "FAIL"] },
-    category: { type: "STRING", enum: ["none", "prompt", "retrieval", "content"] },
-    kb_has_answer: { type: "BOOLEAN" },
-    reason: { type: "STRING" },
+  type: "json_schema",
+  json_schema: {
+    name: "verdict",
+    strict: true,
+    schema: {
+      type: "object",
+      properties: {
+        verdict: { type: "string", enum: ["PASS", "FAIL"] },
+        category: { type: "string", enum: ["none", "prompt", "retrieval", "content"] },
+        kb_has_answer: { type: "boolean" },
+        reason: { type: "string" },
+      },
+      required: ["verdict", "category", "kb_has_answer", "reason"],
+      additionalProperties: false,
+    },
   },
-  required: ["verdict", "category", "kb_has_answer", "reason"],
 };
 
 class HttpError extends Error {
-  constructor(status, message, retryAfter) {
+  constructor(status, message, extra = {}) {
     super(message);
     this.status = status;
-    this.retryAfter = retryAfter;
+    Object.assign(this, extra);
   }
 }
 
-async function callGemini(key, { system, user, temperature = 0.2, schema }) {
-  const body = {
-    systemInstruction: { parts: [{ text: system }] },
-    contents: [{ role: "user", parts: [{ text: user }] }],
-    generationConfig: { temperature },
-  };
-  if (schema) {
-    body.generationConfig.responseMimeType = "application/json";
-    body.generationConfig.responseSchema = schema;
-  }
-
+async function callModel(key, models, { system, user, temperature, maxTokens, json }) {
   let lastError;
-  let busy = null; // set when a model is rate-limited or overloaded
-  for (const model of MODELS) {
-    const r = await fetch(`${API}/${model}:generateContent`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "x-goog-api-key": key },
-      body: JSON.stringify(body),
-    });
-    const data = await r.json().catch(() => ({}));
+  let busy = null;
+  for (const model of models) {
+    const body = {
+      model,
+      messages: [
+        { role: "system", content: system },
+        { role: "user", content: user },
+      ],
+      temperature,
+      max_tokens: maxTokens,
+    };
+    if (json) body.response_format = JUDGE_SCHEMA;
 
-    if (r.ok) {
-      const parts = data?.candidates?.[0]?.content?.parts || [];
-      const text = parts.filter((p) => !p.thought).map((p) => p.text || "").join("").trim();
-      if (!text) throw new HttpError(502, "Gemini returned an empty reply (it may have been blocked by a safety filter).");
-      return { text, model };
-    }
-
-    const msg = data?.error?.message || `Gemini error ${r.status}`;
-    if (r.status === 404) { lastError = new HttpError(404, msg); continue; } // model not available, try next
-    if (r.status === 429) {
-      // Free-tier quotas are per model, so try the next one before giving up.
-      const delay = (data?.error?.details || []).find((d) => d.retryDelay)?.retryDelay;
-      const secs = delay ? parseInt(delay, 10) : 20;
-      busy = new HttpError(429, "Gemini free-tier rate limit hit.", busy ? Math.min(busy.retryAfter, secs) : secs);
+    let r, data;
+    try {
+      r = await fetch(API, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${key}`,
+          "HTTP-Referer": "https://consistency-tester.vercel.app",
+          "X-Title": "Consistency Tester",
+        },
+        body: JSON.stringify(body),
+      });
+      data = await r.json().catch(() => ({}));
+    } catch {
+      lastError = new HttpError(502, "Couldn't reach OpenRouter.");
       continue;
     }
-    if (r.status === 503 || r.status === 500 || /high demand|overloaded|unavailable/i.test(msg)) {
-      // Google-side overload: try the next model; if all are busy, the app waits and retries.
-      busy = busy || new HttpError(429, "Gemini is busy right now.", 10);
-      continue;
+
+    const err = data?.error;
+    const msg = err?.message || `OpenRouter error ${r.status}`;
+    const code = err?.code || r.status;
+
+    if (r.ok && !err) {
+      const text = (data?.choices?.[0]?.message?.content || "").trim();
+      if (text) return { text, model };
+      lastError = new HttpError(502, "The model returned an empty reply.");
+      continue; // try a backup model
     }
-    if (r.status === 400 && /api key/i.test(msg)) throw new HttpError(401, "That Gemini API key isn't valid.");
-    throw new HttpError(r.status >= 500 ? 502 : r.status, msg);
+
+    if (code === 401 || r.status === 401) throw new HttpError(401, "That OpenRouter API key isn't valid.");
+    if (code === 402 || r.status === 402) throw new HttpError(402, "OpenRouter refused the request (credits). Only free models are used, so check the key's settings.");
+    if (code === 429 || r.status === 429) {
+      if (/per-day|per day|daily/i.test(msg)) {
+        throw new HttpError(429, "Today's free request limit is used up. It resets at midnight UTC (5:30 am IST).", { daily: true });
+      }
+      busy = new HttpError(429, "Free models are rate-limited right now.", { retryAfter: 15 });
+      continue; // try the next model
+    }
+    // 400 (e.g. JSON mode unsupported), 404 (model gone), 5xx (provider busy): try the next model
+    lastError = new HttpError(502, msg);
+    if (code >= 500 || r.status >= 500) busy = busy || new HttpError(429, "Free models are busy right now.", { retryAfter: 10 });
   }
-  throw busy || lastError || new HttpError(500, "No Gemini model available.");
+  throw busy || lastError || new HttpError(500, "No free model available.");
+}
+
+function parseVerdict(text) {
+  const match = text.match(/\{[\s\S]*\}/);
+  if (!match) return null;
+  try {
+    const v = JSON.parse(match[0]);
+    const verdict = String(v.verdict || "").toUpperCase();
+    const category = String(v.category || "none").toLowerCase();
+    if (!["PASS", "FAIL"].includes(verdict)) return null;
+    if (!["none", "prompt", "retrieval", "content"].includes(category)) return null;
+    return { verdict, category, kb_has_answer: !!v.kb_has_answer, reason: String(v.reason || "") };
+  } catch {
+    return null;
+  }
 }
 
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Use POST" });
 
-  const key = (req.headers["x-user-key"] || "").trim() || process.env.GEMINI_API_KEY;
+  const key = (req.headers["x-user-key"] || "").trim() || process.env.OPENROUTER_API_KEY;
   if (!key) {
     return res.status(500).json({
-      error: "No Gemini API key configured. Add GEMINI_API_KEY in Vercel settings, or paste your own key in the app.",
+      error: "No OpenRouter API key configured. Add OPENROUTER_API_KEY in Vercel settings, or paste your own key in the app.",
     });
   }
 
@@ -114,29 +164,32 @@ export default async function handler(req, res) {
   if (total > 30000) return res.status(413).json({ error: "Inputs are too long (30,000 characters max)." });
 
   try {
-    const answer = await callGemini(key, {
+    const answer = await callModel(key, ANSWER_MODELS, {
       system: `${systemPrompt}\n\n=== KNOWLEDGE BASE ===\n${knowledge}`,
       user: question,
       temperature: 0.2,
+      maxTokens: 600,
     });
 
-    const judge = await callGemini(key, {
+    const judgeInput = [
+      `SYSTEM PROMPT:\n${systemPrompt}`,
+      `KNOWLEDGE BASE:\n${knowledge}`,
+      `QUESTION:\n${question}`,
+      `EXPECTED ANSWER:\n${expected}`,
+      `ACTUAL ANSWER:\n${answer.text}`,
+      `ACTUAL ANSWER WORD COUNT (exact): ${answer.text.trim().split(/\s+/).length}`,
+    ].join("\n\n---\n\n");
+
+    const judge = await callModel(key, JUDGE_MODELS, {
       system: JUDGE_PROMPT,
-      user: [
-        `SYSTEM PROMPT:\n${systemPrompt}`,
-        `KNOWLEDGE BASE:\n${knowledge}`,
-        `QUESTION:\n${question}`,
-        `EXPECTED ANSWER:\n${expected}`,
-        `ACTUAL ANSWER:\n${answer.text}`,
-        `ACTUAL ANSWER WORD COUNT (exact): ${answer.text.trim().split(/\s+/).length}`,
-      ].join("\n\n---\n\n"),
+      user: judgeInput,
       temperature: 0,
-      schema: JUDGE_SCHEMA,
+      maxTokens: 2000,
+      json: true,
     });
 
-    let verdict;
-    try { verdict = JSON.parse(judge.text); }
-    catch { throw new HttpError(502, "The judge returned an unreadable result. Try running again."); }
+    const verdict = parseVerdict(judge.text);
+    if (!verdict) throw new HttpError(502, "The judge returned an unreadable result. Try running again.");
 
     return res.status(200).json({
       answer: answer.text,
@@ -145,9 +198,14 @@ export default async function handler(req, res) {
       kbHasAnswer: verdict.kb_has_answer,
       reason: verdict.reason,
       model: answer.model,
+      judgeModel: judge.model,
     });
   } catch (e) {
     const status = e instanceof HttpError ? e.status : 500;
-    return res.status(status).json({ error: e.message || "Something went wrong.", retryAfter: e.retryAfter });
+    return res.status(status).json({
+      error: e.message || "Something went wrong.",
+      retryAfter: e.retryAfter,
+      daily: e.daily || undefined,
+    });
   }
 }
