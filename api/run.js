@@ -107,6 +107,11 @@ async function callModel(key, models, { system, user, temperature, maxTokens, js
     const err = data?.error;
     const msg = err?.message || `OpenRouter error ${r.status}`;
     const code = err?.code || r.status;
+    if (!r.ok || err) {
+      // Shows up in Vercel > Logs so failures can be diagnosed. Never logs the key or the prompt.
+      const raw = err?.metadata?.raw ? String(err.metadata.raw).slice(0, 300) : "";
+      console.warn(`[model-error] ${model} status=${r.status} code=${code} msg=${msg.slice(0, 200)} ${raw}`);
+    }
 
     if (r.ok && !err) {
       const text = (data?.choices?.[0]?.message?.content || "").trim();
