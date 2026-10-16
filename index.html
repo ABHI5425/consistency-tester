@@ -199,7 +199,10 @@
       <div class="keyrow"><input type="password" id="userKey" placeholder="sk-or-…" autocomplete="off"></div>
       <p>Only sent with your test requests. Never stored. Only free models are used. Get a key at openrouter.ai.</p>
     </details>
-    <button class="btn primary" id="runBtn" type="button">Run tests</button>
+    <div class="row">
+      <button class="btn" id="retryBtn" type="button" style="display:none">Retry unfinished tests</button>
+      <button class="btn primary" id="runBtn" type="button">Run tests</button>
+    </div>
   </div>
   <div class="banner" id="banner"></div>
 
@@ -340,8 +343,24 @@ function updateSummary(results, total) {
   $("sContent").textContent = count("content");
 }
 
+// Pacing: each test makes 2 model calls. OpenRouter's free models allow 20 calls/minute,
+// so start at most one test every 8 seconds (about 15 calls/minute) to stay safely under it.
+const MIN_GAP_MS = 8000;
+let lastStart = 0;
+async function pace(rowEl) {
+  let wait = lastStart + MIN_GAP_MS - Date.now();
+  while (wait > 0 && !stopRequested) {
+    setPending(rowEl, `Pacing to stay under the free limit (${Math.ceil(wait / 1000)}s)`);
+    await sleep(Math.min(wait, 1000));
+    wait = lastStart + MIN_GAP_MS - Date.now();
+  }
+  lastStart = Date.now();
+}
+
 async function runOne(payload, rowEl) {
   for (let attempt = 0; attempt < 4; attempt++) {
+    await pace(rowEl);
+    setPending(rowEl, attempt ? "Retrying" : "Running");
     if (stopRequested) throw new Error("Stopped");
     const headers = { "Content-Type": "application/json" };
     const key = $("userKey").value.trim();
@@ -353,9 +372,8 @@ async function runOne(payload, rowEl) {
     } catch { throw Object.assign(new Error("Couldn't reach the server."), { fatal: true }); }
     if (res.ok) return data;
     if (res.status === 429 && !data.daily && attempt < 3) {
-      let wait = Math.min(Math.max(data.retryAfter || 20, 5), 60);
-      while (wait > 0 && !stopRequested) { setPending(rowEl, `Rate limited, retrying in ${wait}s`); await sleep(1000); wait--; }
-      setPending(rowEl, "Running");
+      let wait = Math.min(Math.max(data.retryAfter || 30, 20), 60);
+      while (wait > 0 && !stopRequested) { setPending(rowEl, `Free limit busy, waiting ${wait}s`); await sleep(1000); wait--; }
       continue;
     }
     throw Object.assign(new Error(data.error || `Error ${res.status}`), { fatal: !!data.daily || [401, 402, 500].includes(res.status) });
@@ -374,37 +392,53 @@ async function run() {
   if (!systemPrompt && !knowledge) return showBanner("Add a system prompt or a knowledge base first.");
   if (!cases.length) return showBanner("Add at least one test case with both a question and an expected answer.");
 
-  running = true; stopRequested = false;
-  $("runBtn").textContent = "Stop";
   $("results").classList.add("show");
   const rows = $("resRows"); rows.innerHTML = "";
   const els = cases.map((c, i) => { const d = document.createElement("div"); d.className = "res"; d.innerHTML = rowHTML(i, c.question); rows.appendChild(d); return d; });
-  const results = new Array(cases.length).fill(null);
-  updateSummary(results, cases.length);
+  lastRun = { systemPrompt, knowledge, cases, els, results: new Array(cases.length).fill(null) };
+  updateSummary(lastRun.results, cases.length);
   $("results").scrollIntoView({ behavior: "smooth", block: "start" });
+  await processCases(cases.map((_, i) => i));
+}
 
-  for (let i = 0; i < cases.length; i++) {
-    if (stopRequested) { els.slice(i).forEach((el) => setPending(el, "Skipped", false)); break; }
-    setPending(els[i], "Running");
+let lastRun = null;
+async function processCases(indices) {
+  const { systemPrompt, knowledge, cases, els, results } = lastRun;
+  running = true; stopRequested = false;
+  $("runBtn").textContent = "Stop";
+  $("retryBtn").style.display = "none";
+  indices.forEach((i) => setPending(els[i], "Queued", false));
+  for (let n = 0; n < indices.length; n++) {
+    const i = indices[n];
+    if (stopRequested) { indices.slice(n).forEach((j) => setPending(els[j], "Skipped", false)); break; }
     try {
       const r = await runOne({ systemPrompt, knowledge, ...cases[i] }, els[i]);
       results[i] = r; fillRow(els[i], r, cases[i].expected);
     } catch (e) {
       if (e.message === "Stopped") { setPending(els[i], "Skipped", false); continue; }
       errorRow(els[i], e.message);
-      if (e.fatal) { showBanner(e.message); els.slice(i + 1).forEach((el) => setPending(el, "Skipped", false)); break; }
+      if (e.fatal) { showBanner(e.message); indices.slice(n + 1).forEach((j) => setPending(els[j], "Skipped", false)); break; }
     }
     updateSummary(results, cases.length);
   }
   updateSummary(results, cases.length);
   running = false; stopRequested = false;
   $("runBtn").textContent = "Run tests";
+  const unfinished = results.filter((r) => !r).length;
+  if (unfinished) { $("retryBtn").textContent = `Retry ${unfinished} unfinished test${unfinished > 1 ? "s" : ""}`; $("retryBtn").style.display = ""; }
+}
+
+function retryUnfinished() {
+  if (running || !lastRun) return;
+  showBanner("");
+  processCases(lastRun.results.map((r, i) => (r ? -1 : i)).filter((i) => i >= 0));
 }
 
 $("loadDemo").onclick = loadDemo;
 $("clearAll").onclick = clearAll;
 $("addCase").onclick = () => addCase();
 $("runBtn").onclick = run;
+$("retryBtn").onclick = retryUnfinished;
 loadDemo();
 </script>
 </body>
