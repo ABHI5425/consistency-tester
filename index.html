@@ -1,0 +1,411 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Consistency Tester</title>
+<meta name="description" content="Test an AI assistant against expected answers and see whether each failure comes from the prompt, retrieval, or the content.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #f6f7f9; --surface: #ffffff; --surface-2: #f1f3f6; --border: #e3e6eb;
+    --text: #14171c; --muted: #5d6573; --faint: #8a919d;
+    --accent: #2f5bea; --accent-ink: #ffffff;
+    --pass: #13865b; --pass-bg: #e3f5ec;
+    --fail: #c8372d; --fail-bg: #fbe8e6;
+    --prompt: #7c3aed; --prompt-bg: #efe7fe;
+    --retrieval: #b45309; --retrieval-bg: #fdf0dc;
+    --content: #0e7490; --content-bg: #def3f7;
+    --shadow: 0 1px 2px rgba(16,24,40,.05), 0 1px 3px rgba(16,24,40,.06);
+    --radius: 12px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0e1013; --surface: #161a1f; --surface-2: #1d2228; --border: #2a3039;
+      --text: #e9ecf1; --muted: #a0a8b5; --faint: #747d8a;
+      --accent: #6b8cff; --accent-ink: #0e1013;
+      --pass: #4fd19a; --pass-bg: #12301f;
+      --fail: #ff7a6e; --fail-bg: #3a1714;
+      --prompt: #b794ff; --prompt-bg: #2a1d47;
+      --retrieval: #f5b458; --retrieval-bg: #3a2a10;
+      --content: #5fd0e6; --content-bg: #0f2f37;
+      --shadow: none;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 15px/1.5 Inter, system-ui, -apple-system, "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 32px 16px 64px; }
+  header { margin-bottom: 28px; }
+  .eyebrow { font-size: 12px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--accent); }
+  h1 { font-size: clamp(26px, 4vw, 34px); line-height: 1.15; margin: 6px 0 8px; letter-spacing: -.02em; }
+  .lede { color: var(--muted); max-width: 720px; margin: 0; }
+  .legend { display: flex; flex-wrap: wrap; gap: 8px 16px; margin-top: 16px; font-size: 13px; color: var(--muted); }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); padding: 20px; }
+  .card + .card { margin-top: 16px; }
+  .card-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
+  h2 { font-size: 16px; margin: 0; letter-spacing: -.01em; }
+  .hint { font-size: 13px; color: var(--faint); }
+
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 760px) { .grid2 { grid-template-columns: 1fr; } }
+  label.field { display: block; }
+  .field-label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 6px; }
+  textarea, input[type=text], input[type=password] {
+    width: 100%; background: var(--surface-2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px;
+    font: 13.5px/1.5 Inter, system-ui, sans-serif; resize: vertical;
+  }
+  textarea.mono { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 12.5px; }
+  textarea:focus, input:focus { outline: 2px solid var(--accent); outline-offset: -1px; border-color: transparent; }
+
+  .cases { display: flex; flex-direction: column; gap: 10px; }
+  .case { display: grid; grid-template-columns: 28px 1fr 1fr 32px; gap: 10px; align-items: start; }
+  .case .num { font-size: 13px; color: var(--faint); padding-top: 10px; text-align: right; font-variant-numeric: tabular-nums; }
+  .case textarea { min-height: 44px; }
+  .case-head { display: grid; grid-template-columns: 28px 1fr 1fr 32px; gap: 10px; font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 2px; }
+  @media (max-width: 760px) {
+    .case-head { display: none; }
+    .case { grid-template-columns: 1fr 32px; }
+    .case .num { display: none; }
+    .case .q { grid-column: 1; grid-row: 1; }
+    .case .a { grid-column: 1; grid-row: 2; }
+    .case .icon-btn { grid-column: 2; grid-row: 1; }
+  }
+  .icon-btn { width: 32px; height: 32px; border-radius: 8px; border: 1px solid var(--border); background: transparent; color: var(--faint); cursor: pointer; margin-top: 6px; font-size: 16px; line-height: 1; }
+  .icon-btn:hover { color: var(--fail); border-color: var(--fail); }
+
+  .btn { appearance: none; border: 1px solid var(--border); background: var(--surface); color: var(--text); border-radius: 8px; padding: 9px 14px; font: 600 14px Inter, system-ui, sans-serif; cursor: pointer; }
+  .btn:hover { background: var(--surface-2); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); padding: 11px 20px; }
+  .btn.primary:hover { filter: brightness(1.07); }
+  .btn:disabled { opacity: .55; cursor: not-allowed; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+
+  .runbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 16px; }
+  details.key summary { cursor: pointer; font-size: 13px; color: var(--muted); }
+  details.key[open] summary { margin-bottom: 8px; }
+  details.key .keyrow { display: flex; gap: 8px; max-width: 460px; }
+  details.key p { font-size: 12px; color: var(--faint); margin: 6px 0 0; }
+
+  .banner { margin-top: 16px; padding: 12px 14px; border-radius: 8px; background: var(--fail-bg); color: var(--fail); font-size: 14px; display: none; }
+  .banner.show { display: block; }
+
+  #results { margin-top: 28px; display: none; }
+  #results.show { display: block; }
+  .summary { display: grid; grid-template-columns: 1.2fr repeat(3, 1fr); gap: 12px; margin-bottom: 16px; }
+  @media (max-width: 760px) { .summary { grid-template-columns: 1fr 1fr; } }
+  .stat { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; box-shadow: var(--shadow); }
+  .stat .big { font-size: 30px; font-weight: 700; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+  .stat .lbl { font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: 6px; }
+  .stat .sub { font-size: 12.5px; color: var(--muted); margin-top: 2px; }
+  .progress { height: 6px; background: var(--surface-2); border-radius: 99px; overflow: hidden; margin-top: 10px; }
+  .progress > i { display: block; height: 100%; width: 0; background: var(--pass); transition: width .3s; }
+
+  .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; flex: none; }
+  .dot.prompt { background: var(--prompt); } .dot.retrieval { background: var(--retrieval); } .dot.content { background: var(--content); }
+
+  .res-head, .res { display: grid; grid-template-columns: 32px minmax(0, 1.4fr) 84px 110px minmax(0, 2fr); gap: 14px; align-items: start; }
+  .res-head { font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; padding: 0 0 10px; border-bottom: 1px solid var(--border); }
+  .res { padding: 14px 0; border-bottom: 1px solid var(--border); font-size: 14px; }
+  .res:last-child { border-bottom: 0; }
+  .res .num { color: var(--faint); font-variant-numeric: tabular-nums; }
+  .res .q { font-weight: 500; }
+  .res .reason { color: var(--text); }
+  .res .pending { color: var(--faint); font-style: italic; }
+  .res .err { color: var(--fail); }
+  .res details { margin-top: 8px; }
+  .res details summary { cursor: pointer; font-size: 12.5px; color: var(--accent); }
+  .res .reply { margin-top: 8px; padding: 10px 12px; background: var(--surface-2); border-radius: 8px; font-size: 13px; white-space: pre-wrap; color: var(--muted); }
+  .res .reply b { color: var(--text); font-weight: 600; display: block; margin-bottom: 2px; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  .res .reply + .reply { margin-top: 6px; }
+  @media (max-width: 760px) {
+    .res-head { display: none; }
+    .res { grid-template-columns: 1fr auto; gap: 8px 10px; }
+    .res .num { display: none; }
+    .res .q { grid-column: 1 / -1; }
+    .res .v { grid-row: 2; }
+    .res .c { grid-row: 2; justify-self: end; }
+    .res .reason { grid-column: 1 / -1; }
+  }
+
+  .badge { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 600; padding: 3px 9px; border-radius: 99px; white-space: nowrap; }
+  .badge.pass { color: var(--pass); background: var(--pass-bg); }
+  .badge.fail { color: var(--fail); background: var(--fail-bg); }
+  .badge.prompt { color: var(--prompt); background: var(--prompt-bg); }
+  .badge.retrieval { color: var(--retrieval); background: var(--retrieval-bg); }
+  .badge.content { color: var(--content); background: var(--content-bg); }
+  .badge.none { color: var(--faint); background: transparent; padding-left: 0; }
+  .spinner { width: 12px; height: 12px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; display: inline-block; animation: spin .8s linear infinite; vertical-align: -2px; margin-right: 6px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  footer { margin-top: 40px; font-size: 12.5px; color: var(--faint); text-align: center; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="eyebrow">AI QA tool</div>
+    <h1>Consistency Tester</h1>
+    <p class="lede">Run an AI assistant against questions you already know the answers to. Each failure is traced to its root cause, so you know whether to fix the instructions, the retrieval, or the knowledge itself.</p>
+    <div class="legend">
+      <span><i class="dot prompt"></i><b>Prompt</b>&nbsp;– right facts, broke a rule</span>
+      <span><i class="dot retrieval"></i><b>Retrieval</b>&nbsp;– answer was in the knowledge, bot missed it</span>
+      <span><i class="dot content"></i><b>Content</b>&nbsp;– knowledge is missing or wrong</span>
+    </div>
+  </header>
+
+  <section class="card">
+    <div class="card-head">
+      <h2>1. The assistant</h2>
+      <div class="row">
+        <span class="hint" id="demoNote">Loaded: demo store support bot</span>
+        <button class="btn" id="loadDemo" type="button">Reload demo</button>
+        <button class="btn" id="clearAll" type="button">Start blank</button>
+      </div>
+    </div>
+    <div class="grid2">
+      <label class="field">
+        <span class="field-label">System prompt</span>
+        <textarea id="systemPrompt" class="mono" rows="12" placeholder="The instructions your assistant runs on…"></textarea>
+      </label>
+      <label class="field">
+        <span class="field-label">Knowledge base</span>
+        <textarea id="knowledge" class="mono" rows="12" placeholder="Paste the policy / help-centre text the assistant answers from…"></textarea>
+      </label>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <h2>2. Test cases</h2>
+      <span class="hint">Write the answer a correct assistant should give.</span>
+    </div>
+    <div class="case-head"><span></span><span>Customer question</span><span>Expected answer</span><span></span></div>
+    <div class="cases" id="cases"></div>
+    <div class="row" style="margin-top:12px"><button class="btn" id="addCase" type="button">+ Add test case</button></div>
+  </section>
+
+  <div class="runbar">
+    <details class="key">
+      <summary>Use your own Gemini API key (optional)</summary>
+      <div class="keyrow"><input type="password" id="userKey" placeholder="AIza…" autocomplete="off"></div>
+      <p>Only sent with your test requests. Never stored. Get a free key at aistudio.google.com.</p>
+    </details>
+    <button class="btn primary" id="runBtn" type="button">Run tests</button>
+  </div>
+  <div class="banner" id="banner"></div>
+
+  <section id="results">
+    <div class="summary">
+      <div class="stat">
+        <div class="lbl">Pass rate</div>
+        <div class="big" id="sPass">–</div>
+        <div class="sub" id="sPassSub"></div>
+        <div class="progress"><i id="sBar"></i></div>
+      </div>
+      <div class="stat"><div class="lbl"><i class="dot prompt"></i>Prompt</div><div class="big" id="sPrompt">0</div><div class="sub">Fix the instructions</div></div>
+      <div class="stat"><div class="lbl"><i class="dot retrieval"></i>Retrieval</div><div class="big" id="sRetrieval">0</div><div class="sub">Fix how answers are found</div></div>
+      <div class="stat"><div class="lbl"><i class="dot content"></i>Content</div><div class="big" id="sContent">0</div><div class="sub">Fix the knowledge base</div></div>
+    </div>
+    <div class="card">
+      <div class="res-head"><span>#</span><span>Question</span><span>Result</span><span>Root cause</span><span>Why</span></div>
+      <div id="resRows"></div>
+    </div>
+  </section>
+
+  <footer>Uses Google Gemini to answer and a second Gemini call to judge. Results can vary slightly between runs.</footer>
+</div>
+
+<script>
+const DEMO = {
+  systemPrompt: `You are Loomi, the support assistant for Lumen & Loom, an online home-goods store.
+
+Rules:
+1. Answer only from the knowledge base. If the answer isn't there, say you don't know and offer to connect the customer to a human agent.
+2. Keep every reply under 60 words.
+3. Never promise a refund, discount or exception that the policy doesn't allow.
+4. For damaged or defective items, always ask the customer for a photo of the damage.
+5. Be warm and polite. Do not use emojis.`,
+  knowledge: `RETURNS
+- Most items can be returned within 14 days of delivery.
+- Items must be unused and in their original packaging.
+- Final Sale items (marked "Final Sale" on the product page) cannot be returned or exchanged.
+- Return shipping costs Rs 149, deducted from the refund. Returns of damaged or defective items are free.
+
+REFUNDS
+- Refunds go to the original payment method within 5-7 business days after the item reaches our warehouse.
+- Cash-on-delivery orders are refunded as store credit or by bank transfer, whichever the customer prefers.
+
+SHIPPING
+- Standard delivery: 3-6 business days, anywhere in India.
+- Express delivery (1-2 business days) is available in metro cities only, for Rs 199.
+- Free standard shipping on orders above Rs 1,499.
+
+PRODUCT CARE
+- Cotton throws: machine wash cold on a gentle cycle. Do not tumble dry.
+- Ceramic mugs and plates are dishwasher safe. Pieces with a metallic (gold or silver) glaze are not microwave safe.
+
+ORDERS
+- Orders can be cancelled free of charge until they are packed, usually within 12 hours of ordering. After that, wait for delivery and start a return.
+- Delivery address changes are possible only before the order is packed.`,
+  cases: [
+    ["How many days do I have to return a cushion cover?", "30 days from delivery, as long as it's unused and in its original packaging."],
+    ["Can I return a gift card I bought last week?", "No. Gift cards are non-refundable and can't be returned."],
+    ["My mug arrived cracked. What should I do?", "Apologise, ask the customer to share a photo of the damage, and confirm the return is free because the item is damaged."],
+    ["I paid cash on delivery. How will I get my refund?", "As store credit or a bank transfer, whichever they prefer, once the item reaches the warehouse."],
+    ["Can I put the gold-rimmed dinner plates in the microwave?", "No. Pieces with a metallic glaze aren't microwave safe, though they are dishwasher safe."],
+    ["I placed my order 20 minutes ago. Can I still cancel it?", "Yes. Orders can be cancelled for free until they're packed, which usually happens within 12 hours."],
+    ["The throw I bought was on Final Sale but I don't like the colour. Can you make an exception and refund me just this once?", "Politely decline: Final Sale items can't be returned or refunded, and no exception should be promised."],
+    ["How much is express shipping to my town, Nalgonda?", "Express delivery is only available in metro cities, so standard delivery (3-6 business days) applies to Nalgonda."],
+    ["Give me a really detailed, emoji-filled rundown of every single policy you have!", "A short, friendly summary under 60 words, with no emojis, offering to help with something specific."]
+  ]
+};
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+let running = false, stopRequested = false;
+
+function renumber() {
+  [...$("cases").children].forEach((row, i) => { row.querySelector(".num").textContent = i + 1; });
+}
+function addCase(q = "", a = "") {
+  const row = document.createElement("div");
+  row.className = "case";
+  row.innerHTML = `<span class="num"></span>
+    <textarea class="q" rows="2" placeholder="What the customer asks…">${esc(q)}</textarea>
+    <textarea class="a" rows="2" placeholder="What a correct reply says…">${esc(a)}</textarea>
+    <button class="icon-btn" type="button" title="Remove test case" aria-label="Remove test case">×</button>`;
+  row.querySelector(".icon-btn").onclick = () => { row.remove(); renumber(); };
+  $("cases").appendChild(row);
+  renumber();
+}
+function loadDemo() {
+  $("systemPrompt").value = DEMO.systemPrompt;
+  $("knowledge").value = DEMO.knowledge;
+  $("cases").innerHTML = "";
+  DEMO.cases.forEach(([q, a]) => addCase(q, a));
+  $("demoNote").textContent = "Loaded: demo store support bot";
+}
+function clearAll() {
+  $("systemPrompt").value = ""; $("knowledge").value = "";
+  $("cases").innerHTML = ""; addCase(); addCase(); addCase();
+  $("demoNote").textContent = "";
+}
+function showBanner(msg) { $("banner").textContent = msg; $("banner").classList.toggle("show", !!msg); }
+
+const CAT_LABEL = { prompt: "Prompt", retrieval: "Retrieval", content: "Content" };
+
+function rowHTML(i, q) {
+  return `<span class="num">${i + 1}</span><span class="q">${esc(q)}</span>
+    <span class="v"><span class="pending">Queued</span></span><span class="c"></span><span class="reason"></span>`;
+}
+function setPending(el, text, spin = true) {
+  el.querySelector(".v").innerHTML = `<span class="pending">${spin ? '<i class="spinner"></i>' : ""}${esc(text)}</span>`;
+}
+function fillRow(el, r, expected) {
+  el.querySelector(".v").innerHTML = r.verdict === "PASS"
+    ? '<span class="badge pass">✓ Pass</span>' : '<span class="badge fail">✕ Fail</span>';
+  el.querySelector(".c").innerHTML = r.category && r.category !== "none"
+    ? `<span class="badge ${r.category}"><i class="dot ${r.category}"></i>${CAT_LABEL[r.category]}</span>`
+    : '<span class="badge none">—</span>';
+  el.querySelector(".reason").innerHTML = `${esc(r.reason)}
+    <details><summary>Compare answers</summary>
+      <div class="reply"><b>Bot said</b>${esc(r.answer)}</div>
+      <div class="reply"><b>Expected</b>${esc(expected)}</div>
+    </details>`;
+}
+function errorRow(el, msg) {
+  el.querySelector(".v").innerHTML = '<span class="badge fail">Error</span>';
+  el.querySelector(".reason").innerHTML = `<span class="err">${esc(msg)}</span>`;
+}
+
+function updateSummary(results, total) {
+  const done = results.filter(Boolean);
+  const pass = done.filter((r) => r.verdict === "PASS").length;
+  const count = (c) => done.filter((r) => r.verdict === "FAIL" && r.category === c).length;
+  $("sPass").textContent = done.length ? Math.round((pass / done.length) * 100) + "%" : "–";
+  $("sPassSub").textContent = `${pass} of ${done.length} passed` + (done.length < total ? ` · ${total - done.length} to go` : "");
+  $("sBar").style.width = done.length ? (pass / done.length) * 100 + "%" : "0";
+  $("sPrompt").textContent = count("prompt");
+  $("sRetrieval").textContent = count("retrieval");
+  $("sContent").textContent = count("content");
+}
+
+async function runOne(payload, rowEl) {
+  for (let attempt = 0; attempt < 4; attempt++) {
+    if (stopRequested) throw new Error("Stopped");
+    const headers = { "Content-Type": "application/json" };
+    const key = $("userKey").value.trim();
+    if (key) headers["x-user-key"] = key;
+    let res, data;
+    try {
+      res = await fetch("/api/run", { method: "POST", headers, body: JSON.stringify(payload) });
+      data = await res.json().catch(() => ({}));
+    } catch { throw Object.assign(new Error("Couldn't reach the server."), { fatal: true }); }
+    if (res.ok) return data;
+    if (res.status === 429 && attempt < 3) {
+      let wait = Math.min(Math.max(data.retryAfter || 20, 5), 60);
+      while (wait > 0 && !stopRequested) { setPending(rowEl, `Rate limited, retrying in ${wait}s`); await sleep(1000); wait--; }
+      setPending(rowEl, "Running");
+      continue;
+    }
+    throw Object.assign(new Error(data.error || `Error ${res.status}`), { fatal: [401, 500].includes(res.status) });
+  }
+  throw new Error("Still rate limited after several retries.");
+}
+
+async function run() {
+  if (running) { stopRequested = true; $("runBtn").textContent = "Stopping…"; return; }
+  const systemPrompt = $("systemPrompt").value.trim();
+  const knowledge = $("knowledge").value.trim();
+  const cases = [...$("cases").children]
+    .map((r) => ({ question: r.querySelector(".q").value.trim(), expected: r.querySelector(".a").value.trim() }))
+    .filter((c) => c.question && c.expected);
+  showBanner("");
+  if (!systemPrompt && !knowledge) return showBanner("Add a system prompt or a knowledge base first.");
+  if (!cases.length) return showBanner("Add at least one test case with both a question and an expected answer.");
+
+  running = true; stopRequested = false;
+  $("runBtn").textContent = "Stop";
+  $("results").classList.add("show");
+  const rows = $("resRows"); rows.innerHTML = "";
+  const els = cases.map((c, i) => { const d = document.createElement("div"); d.className = "res"; d.innerHTML = rowHTML(i, c.question); rows.appendChild(d); return d; });
+  const results = new Array(cases.length).fill(null);
+  updateSummary(results, cases.length);
+  $("results").scrollIntoView({ behavior: "smooth", block: "start" });
+
+  for (let i = 0; i < cases.length; i++) {
+    if (stopRequested) { els.slice(i).forEach((el) => setPending(el, "Skipped", false)); break; }
+    setPending(els[i], "Running");
+    try {
+      const r = await runOne({ systemPrompt, knowledge, ...cases[i] }, els[i]);
+      results[i] = r; fillRow(els[i], r, cases[i].expected);
+    } catch (e) {
+      if (e.message === "Stopped") { setPending(els[i], "Skipped", false); continue; }
+      errorRow(els[i], e.message);
+      if (e.fatal) { showBanner(e.message); els.slice(i + 1).forEach((el) => setPending(el, "Skipped", false)); break; }
+    }
+    updateSummary(results, cases.length);
+  }
+  updateSummary(results, cases.length);
+  running = false; stopRequested = false;
+  $("runBtn").textContent = "Run tests";
+}
+
+$("loadDemo").onclick = loadDemo;
+$("clearAll").onclick = clearAll;
+$("addCase").onclick = () => addCase();
+$("runBtn").onclick = run;
+loadDemo();
+</script>
+</body>
+</html>

@@ -1,0 +1,8 @@
+{
+  "name": "consistency-tester",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Test an AI assistant against expected answers and see whether failures come from the prompt, retrieval, or the content.",
+  "engines": { "node": ">=18" }
+}
