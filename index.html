@@ -195,9 +195,9 @@
 
   <div class="runbar">
     <details class="key">
-      <summary>Use your own Gemini API key (optional)</summary>
-      <div class="keyrow"><input type="password" id="userKey" placeholder="AIza…" autocomplete="off"></div>
-      <p>Only sent with your test requests. Never stored. Get a free key at aistudio.google.com.</p>
+      <summary>Use your own OpenRouter API key (optional)</summary>
+      <div class="keyrow"><input type="password" id="userKey" placeholder="sk-or-…" autocomplete="off"></div>
+      <p>Only sent with your test requests. Never stored. Only free models are used. Get a key at openrouter.ai.</p>
     </details>
     <button class="btn primary" id="runBtn" type="button">Run tests</button>
   </div>
@@ -221,7 +221,7 @@
     </div>
   </section>
 
-  <footer>Uses Google Gemini to answer and a second Gemini call to judge. Results can vary slightly between runs.</footer>
+  <footer>Runs on free open models via OpenRouter: one model plays the assistant, a separate model judges. Results can vary slightly between runs.</footer>
 </div>
 
 <script>
@@ -352,13 +352,13 @@ async function runOne(payload, rowEl) {
       data = await res.json().catch(() => ({}));
     } catch { throw Object.assign(new Error("Couldn't reach the server."), { fatal: true }); }
     if (res.ok) return data;
-    if (res.status === 429 && attempt < 3) {
+    if (res.status === 429 && !data.daily && attempt < 3) {
       let wait = Math.min(Math.max(data.retryAfter || 20, 5), 60);
       while (wait > 0 && !stopRequested) { setPending(rowEl, `Rate limited, retrying in ${wait}s`); await sleep(1000); wait--; }
       setPending(rowEl, "Running");
       continue;
     }
-    throw Object.assign(new Error(data.error || `Error ${res.status}`), { fatal: [401, 500].includes(res.status) });
+    throw Object.assign(new Error(data.error || `Error ${res.status}`), { fatal: !!data.daily || [401, 402, 500].includes(res.status) });
   }
   throw new Error("Still rate limited after several retries.");
 }
