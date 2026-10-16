@@ -14,7 +14,7 @@ const onlyFree = (list) =>
 // The "assistant" being tested. First model is preferred; others are backups.
 const ANSWER_MODELS = onlyFree(
   process.env.ANSWER_MODELS ||
-    "google/gemma-4-31b-it:free,google/gemma-4-26b-a4b-it:free,nvidia/nemotron-3-super-120b-a12b:free"
+    "google/gemma-4-31b-it:free,google/gemma-4-26b-a4b-it:free,nvidia/nemotron-3.5-super-vl:free,nvidia/nemotron-3-super-120b-a12b:free"
 );
 // The judge. Prefer larger models that support structured JSON output.
 const JUDGE_MODELS = onlyFree(
@@ -83,6 +83,9 @@ async function callModel(key, models, { system, user, temperature, maxTokens, js
       ],
       temperature,
       max_tokens: maxTokens,
+      // Some free models "think" before answering. Keep thinking short so it can't use up
+      // the whole token budget and leave an empty reply. Models that don't think ignore this.
+      reasoning: { effort: "low" },
     };
     if (json) body.response_format = JUDGE_SCHEMA;
 
@@ -116,6 +119,7 @@ async function callModel(key, models, { system, user, temperature, maxTokens, js
     if (r.ok && !err) {
       const text = (data?.choices?.[0]?.message?.content || "").trim();
       if (text) return { text, model };
+      console.warn(`[model-error] ${model} empty reply (finish_reason=${data?.choices?.[0]?.finish_reason})`);
       lastError = new HttpError(502, "The model returned an empty reply.");
       continue; // try a backup model
     }
@@ -177,7 +181,7 @@ export default async function handler(req, res) {
       system: `${systemPrompt}\n\n=== KNOWLEDGE BASE ===\n${knowledge}`,
       user: question,
       temperature: 0.2,
-      maxTokens: 600,
+      maxTokens: 2500,
     });
 
     const judgeInput = [
@@ -193,7 +197,7 @@ export default async function handler(req, res) {
       system: JUDGE_PROMPT,
       user: judgeInput,
       temperature: 0,
-      maxTokens: 2000,
+      maxTokens: 3000,
       json: true,
     });
 
