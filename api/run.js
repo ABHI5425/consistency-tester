@@ -121,6 +121,10 @@ async function callModel(key, models, { system, user, temperature, maxTokens, js
       if (/per-day|per day|daily/i.test(msg)) {
         throw new HttpError(429, "Today's free request limit is used up. It resets at midnight UTC (5:30 am IST).", { daily: true });
       }
+      if (/per-min|per min/i.test(msg)) {
+        // Account-wide per-minute limit: trying other models would only use up more requests. Wait instead.
+        throw new HttpError(429, "Free models are rate-limited right now.", { retryAfter: 30 });
+      }
       busy = new HttpError(429, "Free models are rate-limited right now.", { retryAfter: 15 });
       continue; // try the next model
     }
