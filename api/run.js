@@ -71,7 +71,14 @@ class HttpError extends Error {
   }
 }
 
-async function callModel(key, models, { system, user, temperature, maxTokens, json }) {
+// Free models are flaky: some are overloaded for minutes at a time, some hang.
+const CALL_TIMEOUT_MS = 45000; // give up on one model after 45s and try the next
+const COOLDOWN_MS = 90000; // skip a model that just failed for 90s (while this server instance is warm)
+const cooldown = new Map();
+
+async function callModel(key, models, { system, user, temperature, maxTokens, json, effort, deadline }) {
+  // If every model is cooling down, try them all anyway rather than failing outright.
+  if (models.every((m) => (cooldown.get(m) || 0) > Date.now())) models.forEach((m) => cooldown.delete(m));
   let lastError;
   let busy = null;
   for (const model of models) {
@@ -83,13 +90,18 @@ async function callModel(key, models, { system, user, temperature, maxTokens, js
       ],
       temperature,
       max_tokens: maxTokens,
-      // Some free models "think" before answering. Keep thinking short so it can't use up
-      // the whole token budget and leave an empty reply. Models that don't think ignore this.
-      reasoning: { effort: "low" },
+      // Some free models "think" before answering, which is slow and can use up the whole
+      // token budget (empty reply). The assistant doesn't need to think; the judge thinks a little.
+      reasoning: { effort },
     };
     if (json) body.response_format = JUDGE_SCHEMA;
 
+    if (deadline && Date.now() > deadline) break; // stay well inside Vercel's 5-minute limit
+    if ((cooldown.get(model) || 0) > Date.now()) { busy = busy || new HttpError(429, "Free models are busy right now.", { retryAfter: 20 }); continue; }
+
     let r, data;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), CALL_TIMEOUT_MS);
     try {
       r = await fetch(API, {
         method: "POST",
@@ -100,11 +112,18 @@ async function callModel(key, models, { system, user, temperature, maxTokens, js
           "X-Title": "Consistency Tester",
         },
         body: JSON.stringify(body),
+        signal: controller.signal,
       });
       data = await r.json().catch(() => ({}));
-    } catch {
-      lastError = new HttpError(502, "Couldn't reach OpenRouter.");
+    } catch (e) {
+      const timedOut = e?.name === "AbortError";
+      console.warn(`[model-error] ${model} ${timedOut ? `no reply within ${CALL_TIMEOUT_MS / 1000}s` : "network error"}`);
+      if (timedOut) cooldown.set(model, Date.now() + COOLDOWN_MS);
+      lastError = new HttpError(502, timedOut ? "The free model took too long to reply." : "Couldn't reach OpenRouter.");
+      busy = busy || new HttpError(429, "Free models are busy right now.", { retryAfter: 20 });
       continue;
+    } finally {
+      clearTimeout(timer);
     }
 
     const err = data?.error;
@@ -134,12 +153,17 @@ async function callModel(key, models, { system, user, temperature, maxTokens, js
         // Account-wide per-minute limit: trying other models would only use up more requests. Wait instead.
         throw new HttpError(429, "Free models are rate-limited right now.", { retryAfter: 30 });
       }
+      // This model is overloaded upstream (shared by everyone using it free). Skip it for a while.
+      cooldown.set(model, Date.now() + COOLDOWN_MS);
       busy = new HttpError(429, "Free models are rate-limited right now.", { retryAfter: 15 });
       continue; // try the next model
     }
     // 400 (e.g. JSON mode unsupported), 404 (model gone), 5xx (provider busy): try the next model
     lastError = new HttpError(502, msg);
-    if (code >= 500 || r.status >= 500) busy = busy || new HttpError(429, "Free models are busy right now.", { retryAfter: 10 });
+    if (code >= 500 || r.status >= 500) {
+      cooldown.set(model, Date.now() + COOLDOWN_MS);
+      busy = busy || new HttpError(429, "Free models are busy right now.", { retryAfter: 10 });
+    }
   }
   throw busy || lastError || new HttpError(500, "No free model available.");
 }
@@ -176,12 +200,15 @@ export default async function handler(req, res) {
   const total = systemPrompt.length + knowledge.length + question.length + expected.length;
   if (total > 30000) return res.status(413).json({ error: "Inputs are too long (30,000 characters max)." });
 
+  const deadline = Date.now() + 200000; // stop trying new models after ~3.5 minutes
   try {
     const answer = await callModel(key, ANSWER_MODELS, {
+      deadline,
       system: `${systemPrompt}\n\n=== KNOWLEDGE BASE ===\n${knowledge}`,
       user: question,
       temperature: 0.2,
-      maxTokens: 2500,
+      maxTokens: 1500,
+      effort: "none", // the assistant answers directly, no thinking: faster and never an empty reply
     });
 
     const judgeInput = [
@@ -194,10 +221,12 @@ export default async function handler(req, res) {
     ].join("\n\n---\n\n");
 
     const judge = await callModel(key, JUDGE_MODELS, {
+      deadline,
       system: JUDGE_PROMPT,
       user: judgeInput,
       temperature: 0,
       maxTokens: 3000,
+      effort: "low",
       json: true,
     });
 
